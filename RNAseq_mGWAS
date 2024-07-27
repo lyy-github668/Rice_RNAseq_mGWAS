@@ -1,0 +1,389 @@
+RNA-seq script
+#---------------------------------------------------------------
+wget http://rice.uga.edu/pub/data/Eukaryotic_Projects/o_sativa/annotation_dbs/pseudomolecules/version_7.0/all.dir/all.con
+wget http://rice.uga.edu/pub/data/Eukaryotic_Projects/o_sativa/annotation_dbs/pseudomolecules/version_7.0/all.dir/all.gff3
+mv all.gff3 rice.gff3
+mv all.con rice.genome.fa
+
+module load gffread/0.12.6
+gffread rice.gff3 -T -o rice.gtf
+
+module load hisat2/2.2.1
+hisat2-build rice.genome.fa rice
+module load SAMtools/1.9
+bsub -J rice_trans -n 8 -o %J.out -e %J.err -q normal 'ls *_1.clean.fq.gz | while read id;do hisat2 -q -x ../../Genome/rice -1 $id -2 ${id%*_1.clean.fq.gz}_2.clean.fq.gz -S ../../Hisat2/${id%*_1.clean.fq.gz}.sam; done && cd ../../Hisat2/ && ls *.sam| while read id;do samtools view -F 4 -Su $id > ${id%.sam}.bam  &&  samtools sort ${id%.sam}.bam -o ${id%.sam}.sort.bam && rm ${id%.sam}.bam;done'
+bsub -J UVB -n 8 -o %J.out -e %J.err -q normal 'ls *_1.clean.fq.gz | while read id;do hisat2 -q -x ../../Genome/rice -1 $id -2 ${id%*_1.clean.fq.gz}_2.clean.fq.gz -S ${id%*_1.clean.fq.gz}.sam; done && ls *.sam| while read id;do samtools view -F 4 -Su $id > ${id%.sam}.bam  &&  samtools sort ${id%.sam}.bam -o ${id%.sam}.sort.bam && rm ${id%.sam}.bam;done'
+module load Subread/2.0.0
+# ls *.sort.bam|while read id;do featureCounts -p -B -C -P -M -O -t exon -g gene_id -a ../../Genome/rice.gtf -o ${id%.sort.bam}".counts.txt" $id ;done
+cat res.txt | while read id;do featureCounts -p -t exon -g gene_id -a ../Genome/rice.gtf -o ${id%.sort.bam}".counts.txt" $id ;done
+
+GWAS Script
+#---------------------------------------------------------------
+#总流程
+dos2unix pheno.txt
+perl do_pheno.pl
+plink --noweb --bfile SNP/Tomato/gwas_all_chr.raw --keep keep_individual.txt --make-bed --maf 0.05 --geno 0.1 --out gwas_all_chr.filter
+perl phenofile.pl
+plink --bfile gwas_all_chr.filter --recode12 --output-missing-genotype 0 --transpose --out new_all_chr.filter
+../GWAS/emmax-beta-07Mar2010/emmax-kin -v -h -s -d 10 new_all_chr.filter
+sh emmax.sh
+cd result/
+perl re_fileter.pl
+perl SNP_filter.pl
+cd ..
+plink --noweb --bfile gwas_all_chr.filter --list-all --tag-r2 0.25 --tag-kb 1000 --show-tags result/SNP_LD/SNP_filter.txt --out result/SNP_LD/SNP_LD
+cd result/SNP_LD/
+perl test3.pl
+cd ..
+perl lmm_traits_filter.pl
+cd filter.out
+R CMD BATCH --no-save --no-restore MM.R
+
+#服务器登录及后台提交
+bsub -q interactive -Is bash
+bsub -J emmax -n 1 -o %J.out -e %J.err -q q2680v2 "sh emmax.sh"
+java -jar ../GWAS/gec.jar -Xmx1g --effect-number --plink-binary gwas_all_chr.filter --genome --out P.txt
+
+#绘图
+library("qqman")
+mydata<-read.table(temp[i],header=TRUE,sep="\t")
+mydata$SNP<-as.character(mydata$SNP)
+mydata$CHR<-as.numeric(mydata$CHR)
+mydata1<-na.omit(mydata)
+
+outfile<-paste("MM/",temp[i],".png",sep = "")
+png(outfile,height = 400,width = 1400,pointsize = 12)
+manhattan(mydata1,main="Manhattan Plot",cex=1.5,cex.axis=1,col=c("red","blue"),suggestiveline =F,
+genomewideline=F,,chrlabs = c("1:12"))
+abline(h=-log10(3.10e-07), col="gray",lty=2,lwd=2)
+for line in $(cat name.txt)
+do
+ ../GWAS/emmax-beta-07Mar2010/emmax -v -d 10 -t new_all_chr.filter -p pheno/$line -k new_all_chr.filter.hIBS.kinf  -o result/$line
+done
+
+#------------------------------------------------------------------------------
+#MM image
+temp<-list.files(pattern = "*.txt")
+for (i in 1:length(temp)) {
+library("qqman")
+mydata<-read.table(temp[i],header=TRUE,sep="\t")
+mydata$SNP<-as.character(mydata$SNP)
+mydata$CHR<-as.numeric(mydata$CHR)
+mydata1<-na.omit(mydata)
+
+outfile<-paste("MM/",temp[i],".png",sep = "")
+png(outfile,height = 900,width = 1200,pointsize = 12)
+manhattan(mydata1,main="Manhattan Plot",cex=1.5,cex.axis=1,col=c("red","blue"),suggestiveline =F,
+genomewideline=F,chrlabs = c("1:12"))
+abline(h=-log10(5.149065e-08), col="gray",lty=2,lwd=2)
+#manhatton.plot(dataframe = mydata1, SNPname = "SNP", chromosome = "CHR",position = "BP", pvcol = "P",gapbp = 500,
+#color=c("lightgreen","skyblue2"), line1 = 3)
+dev.off()
+}
+
+#-------------------------------------------------------------------------
+#do_pheno.pl
+
+open(In,"pheno.txt");
+open(Ke,">keep_individual.txt");
+while (<In>) {
+    @arr=split(/\t/,$_);
+    if ($arr[0]=~/FID/){
+        next;
+    }
+    else{
+        print Ke "$arr[0]\t$arr[1]\n";
+    }
+
+}
+close(In);
+close(Ke);
+
+open(In,"pheno.txt");
+@arr=<In>;
+#print @arr;
+$arr[0]=~s/\n//;
+$arr[0]=~s/\r//;
+$arr[0]=~s/ /_/g;
+@all=split(/\t/,$arr[0]);#��һ��
+#print $all[0];
+close(In);
+open(Na,">name.txt");
+for($i=2;$i<@all;$i++){
+    $arr[$i]=~s/\r\n//g;
+    #open(Out,">pheno/$all[$i].txt");
+    open(In,"pheno.txt");
+=p   while (<In>) {
+        #print $_;
+        $_=~s/\n//;
+        @a=split(/\t/,$_);#ÿһ������,
+        if ($a[0]=~/F/) {
+            next;
+        }
+        else{
+        #    print Out "$a[0]\t$a[1]\t$a[$i]\n";
+        }
+
+    }
+=cut
+    print Na "$all[$i].txt\n";
+    #close(Out);
+    close(In);
+}
+close(Na);
+close(In);
+
+#----------------------------------------------------------------
+#lmm_traits_filter.pl
+
+use Cwd;
+$dirname=getcwd;
+
+open FL,"all.locus_brief_info.6.0.txt";
+while(<FL>){
+    s/\n//;
+	s/\r//;
+    my @list=split/\t/;
+    $pos_loc{$list[2]}{$list[3]}=join("\t",$list[1],$list[4],$list[5]);
+    push @{$chr[$list[0]]},$list[2],$list[3];
+}
+close FL;
+print "2\n";
+
+open FL,"SNP_LD/SNP_LD.txt";#打开连锁文件
+while(<FL>){
+    my @a=split/\t/;
+    $SNP{$a[0]}=$_;#以连锁的snp绑定和他所有连锁的snp
+}
+close FL;
+print"1\n";
+
+opendir(DIR,$dirname)||die"Error in opening dir $dirname\n";
+while($filename=readdir(DIR)){
+    if($filename=~/out\.txt/){
+	my(@aa,@bb,@cc,%hash2,@all,$id);
+	open FLS,">filter.out/$filename";
+	print"$filename\n";
+	open FL,"$filename";
+	while(<FL>){
+	    s/\n//;
+	    if(/SNP/){
+		print FLS"$_\n";
+		push(@cc,$_)
+	    }
+	    else{
+		my @a=split/\t/;
+		if($a[4]<=1.0E-1 and $a[4]!~/NA/){
+		    if($a[4]<=5E-6){
+			print $a[0]."\n";
+			push(@aa,$_)
+		    }
+		    else{
+			push(@bb,$_)
+		    }    
+		}
+		else{
+		    next;
+		}
+	    }
+	}
+	close FL;
+
+	foreach my $str(@aa){
+	    my(%hash_2,$count);
+	    my @line_a=split/\t/,$str;
+	    my @list=split/\t/,$SNP{$line_a[0]};  
+	    foreach(@list){
+		if (abs($line_a[0]-$_)<=1E6) {
+		    $hash_2{$_}=1
+		}
+	    }
+	    foreach(@aa){
+		my @line_b=split/\t/;
+		if($hash_2{$line_b[0]}==1){
+		    $count++
+		}
+		if($count>=3){
+		    print FLS"$str\n";
+		    push(@cc,$str);last 
+		}
+	    }
+	}
+
+	foreach(@bb){
+	    print FLS"$_\n";
+	}	
+        close FLS;
+
+	open FLS,">LMM_traits/$filename";
+	foreach(@cc){
+	    my @list=split/\t/;
+            my $string=join("\t",$list[0],$list[1],$list[3],$list[4]);
+            if($string=~/SNP/){
+                print FLS"SNP_ID\t$string\n";
+            }
+            elsif($list[4]<=5E-6){
+                if($hash2{$list[0]}==1){
+                    next
+                }
+                else{
+                    $id++;
+                    print FLS"$id\t$string\n";
+                    push(@all,$string);
+                    my @b=split/\t/,$SNP{$list[0]};
+                    foreach(@b){
+			if (abs($list[0]-$_)<=1E6) {
+                    	    $hash2{$_}=1
+                	}
+                    }
+                }
+            }
+            else{
+		last
+            }
+        }
+
+        print FLS"\nDetails of each locus:\n";
+        $id=1;
+        foreach(@all){
+            print FLS"SNP_ID\tSNP\tChromosome\tPosition\tPvalueID\n";
+	    print FLS"$id\t$_\n\n";
+	    print FLS"Genes in near region:\n";
+	    print FLS"\tDistance(kb)\tstart_pos\tend_pos\tlocus\trice_locus\tannotation\n";
+	    $id++;
+
+            my @list=split/\t/;
+            my @tmp=@{$chr[$list[1]]};
+            my ($count,@loc_list);
+            for($i=0;$i<@tmp;$i+=2){
+                if(($list[2]>=($tmp[$i]+$tmp[$i+1])/2)&&($list[2]<=($tmp[$i+2]+$tmp[$i+3])/2)){
+                    $count=$i;
+                    last
+                }
+            }
+
+	    if($count>=@tmp-80){
+        	@loc_list=@tmp[@tmp-160..@tmp-1]
+    	    }
+	    elsif($count<80){
+        	@loc_list=@tmp[0..159];
+	    }
+	    else{
+        	@loc_list=@tmp[$count-80..$count+79];
+	    }
+
+            my @result;
+	    for($i=0;$i<=@loc_list-1;$i+=2){
+		if(($loc_list[$i]-$list[2])*($loc_list[$i+1]-$list[2])<=0){
+		    $dist=0
+		}
+		else{
+		    if(abs($loc_list[$i]-$list[2])<abs($loc_list[$i+1]-$list[2])){
+			$dist=int(($loc_list[$i]-$list[2])/1000)
+		    }
+		    else{
+			$dist=int(($loc_list[$i+1]-$list[2])/1000)
+		    }
+		}
+
+		if (abs($dist)<=300) {
+		    push(@result,join("\t",$dist,$loc_list[$i],$loc_list[$i+1],$pos_loc{$loc_list[$i]}{$loc_list[$i+1]}))
+		}
+	    }
+
+	    @result=map {$_->[0]}
+		sort {$a->[1] <=> $b->[1]}
+		map{[$_,(split/\t/)[0]]} @result;
+
+	    foreach(@result){
+		print FLS"\t$_\n"; 
+	    }
+	    print FLS "\n";
+	}
+	close FLS;
+    }
+}
+
+#------------------------------------------------------------------
+#phenofile.pl
+
+open(In,"gwas_all_chr.filter.fam");
+open(Out,">list.txt");
+@arr=<In>;
+for($i=0;$i<@arr;$i++){
+	$arr[$i]=~s/\n//;
+	$arr[$i]=~s/\r//;
+	@array=split(" ",$arr[$i]);
+	print Out "$array[0]\n";
+}
+close(In);
+close(Out);
+
+open(In,"pheno.txt") or die EXPR;
+open(In1,"list.txt") or die EXPR;
+@arr=<In>;
+@list=<In1>;
+chomp @list;
+chomp @arr;
+@name=split("\t",$arr[0]);
+for($i=2;$i<@name;$i++){
+$name[$i]=~s/\r?\n$//;
+$name[$i]=~s/ /_/g;
+    open(Out,">pheno/$name[$i].txt") or die EXPR;
+
+    for($li=0;$li<@list;$li++){
+        $id=$list[$li];
+        for($ii=1;$ii<@arr;$ii++){
+            @brray=split("\t",$arr[$ii]);
+			$id=~s/\s+//;
+			$brray[0]=~s/\s+//;
+			if ($id eq $brray[0]){
+			#print "$id\t$brray[0]\n";
+			#print "n\n";
+            print Out "$brray[0]\t$brray[1]\t$brray[$i]\n";
+			}
+        }
+    }
+}
+
+#-------------------------------------------------------------
+#test3.pl
+
+open FLS,">SNP_LD.txt";
+my %hash;
+
+open FL,"SNP_filter.txt";
+while(<FL>){
+    s/\n//;
+    $hash{$_}=1
+}
+close FL;
+
+open FL,"SNP_LD.tags.list";
+while(<FL>){
+    s/\n//;
+    if(/SNP/){
+	next
+    }
+    else{
+        my @a=split" ";
+        print FLS"$a[0]";
+        my @b=split/\|/,$a[@a-1];
+        foreach(@b){
+            if($hash{$_}==1){
+                print FLS"\t$_";
+            } 
+        }       
+        print FLS"\n";
+    }
+}   
+close FL;
+close FLS;
+
+#-------------------------------------------------------
+#emmax.sh
+
+for line in $(cat name.txt)
+do
+ emmax -v -d 10 -t new_all_chr.filter -p pheno/$line -k new_all_chr.filter.hIBS.kinf  -o result/$line
+done
